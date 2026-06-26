@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  mcp-gateway:
+    build: .
+    container_name: mcp-gateway
+    ports:
+      - "${MCP_GATEWAY_PORT:-8080}:8080"
+    volumes:
+      # Mount config for easy editing without rebuilding
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - MCP_GATEWAY_CONFIG=/app/config.yaml
+      - MCP_GATEWAY_HOST=0.0.0.0
+      - MCP_GATEWAY_PORT=8080
+      - MCP_GATEWAY_LOG_LEVEL=${MCP_GATEWAY_LOG_LEVEL:-info}
+    env_file:
+      # Optional: load backend URLs and other vars from .env
+      - path: .env
+        required: false
+    extra_hosts:
+      # Allow container to reach host-network services
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP Gateway</title>
+    <link rel="stylesheet" type="text/css" href="static/css/style.css" />
+    <link href="static/libs/font-awesome.min.css" rel="stylesheet">
+    <script src="static/libs/jquery-3.5.1.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-content">
+                <div class="logo-section">
+                    <h1 id="app-title"><i class="fas fa-network-wired"></i> MCP Gateway</h1>
+                    <span class="live-dot" id="live-dot" title="WebSocket connected"></span>
+                </div>
+                <div class="header-actions">
+                    <button type="button" class="btn btn-secondary btn-sm" id="refresh-all-btn" title="Refresh all backends">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                    <button type="button" class="dark-mode-toggle" id="dark-mode-toggle" title="Toggle Dark Mode">
+                        <i class="fas fa-moon"></i>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Layout -->
+        <main class="app-main">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <div class="sidebar-header">
+                    <h2>Management</h2>
+                </div>
+                <nav class="sidebar-nav">
+                    <ul class="nav-list">
+                        <li><a href="#" class="nav-item active" data-view="dashboard"><i class="fas fa-tachometer-alt"></i> Dashboard</a></li>
+                        <li><a href="#" class="nav-item" data-view="backends"><i class="fas fa-server"></i> Backends</a></li>
+                        <li><a href="#" class="nav-item" data-view="tools"><i class="fas fa-wrench"></i> Tools</a></li>
+                        <li><a href="#" class="nav-item" data-view="logs"><i class="fas fa-list-alt"></i> Activity Log</a></li>
+                        <li><a href="#" class="nav-item" data-view="settings"><i class="fas fa-cog"></i> Settings</a></li>
+                    </ul>
+                </nav>
+            </aside>
+
+            <!-- Content -->
+            <div class="content-area">
+                <div class="content-panel" id="content-panel">
+
+                    <!-- Dashboard View -->
+                    <section id="view-dashboard">
+                        <h2 class="section-title">Gateway Overview</h2>
+                        <div class="stats-bar" id="stats-bar">
+                            <div class="stat-card">
+                                <div class="stat-icon primary"><i class="fas fa-server"></i></div>
+                                <div class="stat-content"><h3 id="stat-backends">0</h3><p>Backends</p></div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-icon success"><i class="fas fa-check-circle"></i></div>
+                                <div class="stat-content"><h3 id="stat-connected">0</h3><p>Connected</p></div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-icon info"><i class="fas fa-wrench"></i></div>
+                                <div class="stat-content"><h3 id="stat-tools">0</h3><p>Tools</p></div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-icon warning"><i class="fas fa-exchange-alt"></i></div>
+                                <div class="stat-content"><h3 id="stat-calls">0</h3><p>Total Calls</p></div>
+                            </div>
+                        </div>
+                        <div class="backends-grid" id="dashboard-backends"></div>
+                    </section>
+
+                    <!-- Backends View -->
+                    <section id="view-backends" style="display: none;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem;">
+                            <h2 class="section-title" style="margin-bottom: 0;">Backend Servers</h2>
+                            <div style="display: flex; gap: 0.5rem;">
+                                <button type="button" class="btn btn-secondary btn-sm" id="backup-btn"><i class="fas fa-download"></i> Backup</button>
+                                <button type="button" class="btn btn-secondary btn-sm" id="restore-btn"><i class="fas fa-upload"></i> Restore</button>
+                                <button type="button" class="btn btn-primary" id="add-backend-btn"><i class="fas fa-plus"></i> Add Backend</button>
+                            </div>
+                        </div>
+                        <div class="backends-grid" id="backends-list"></div>
+                        <input type="file" id="restore-file-input" accept=".json" style="display: none;">
+                    </section>
+
+                    <!-- Tools View -->
+                    <section id="view-tools" style="display: none;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem;">
+                            <h2 class="section-title" style="margin-bottom: 0;">Registered Tools</h2>
+                            <div class="search-box">
+                                <i class="fas fa-search"></i>
+                                <input type="text" id="tool-search" placeholder="Search tools..." class="form-input">
+                            </div>
+                        </div>
+                        <div id="tools-list"></div>
+                    </section>
+
+                    <!-- Logs View -->
+                    <section id="view-logs" style="display: none;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem;">
+                            <h2 class="section-title" style="margin-bottom: 0;">Activity Log</h2>
+                            <button type="button" class="btn btn-secondary btn-sm" id="refresh-logs-btn"><i class="fas fa-sync-alt"></i> Refresh</button>
+                        </div>
+                        <div id="logs-container"></div>
+                    </section>
+
+                    <!-- Settings View -->
+                    <section id="view-settings" style="display: none;">
+                        <h2 class="section-title">Settings</h2>
+                        <div class="settings-panel">
+                            <div class="settings-card">
+                                <h3><i class="fas fa-key"></i> Gateway API Key</h3>
+                                <p class="form-hint">When set, all API and MCP requests require this key. Configure in config.yaml or environment.</p>
+                                <div class="form-group">
+                                    <label>Current Status</label>
+                                    <span id="api-key-status" class="badge badge-lazy">Not Set</span>
+                                </div>
+                            </div>
+                            <div class="settings-card">
+                                <h3><i class="fas fa-plug"></i> Auto-Reconnect</h3>
+                                <p class="form-hint">Automatically reconnect disconnected backends with exponential backoff.</p>
+                                <div class="form-group">
+                                    <label>Status</label>
+                                    <span id="reconnect-status" class="badge badge-lazy">Enabled</span>
+                                </div>
+                            </div>
+                            <div class="settings-card">
+                                <h3><i class="fas fa-bolt"></i> Lazy Schema Loading</h3>
+                                <p class="form-hint">Only fetch tool schemas when a tool is called, not during discovery. Reduces token usage.</p>
+                                <div class="form-group">
+                                    <label>Status</label>
+                                    <span id="lazy-status" class="badge badge-lazy">Enabled</span>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Add/Edit Backend Modal -->
+    <div class="modal-overlay" id="backend-modal-overlay">
+        <div class="modal" id="backend-modal">
+            <div class="modal-header">
+                <h2 id="modal-title">Add Backend</h2>
+                <button type="button" class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="backend-form">
+                    <input type="hidden" id="form-editing-name" value="">
+
+                    <div class="form-group">
+                        <label for="form-name">Name</label>
+                        <input type="text" class="form-input" id="form-name" placeholder="my-mcp-server" required>
+                        <p class="form-hint">Unique identifier for this backend</p>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="form-transport">Transport Type</label>
+                        <select class="form-select" id="form-transport">
+                            <option value="http">HTTP (Streamable HTTP / JSON-RPC POST)</option>
+                            <option value="sse">SSE (Server-Sent Events)</option>
+                            <option value="stdio">Stdio (Subprocess)</option>
+                        </select>
+                        <p class="form-hint">HTTP for /mcp endpoints, SSE for /sse endpoints, Stdio for local commands</p>
+                    </div>
+
+                    <!-- HTTP/SSE fields -->
+                    <div id="http-fields">
+                        <div class="form-group">
+                            <label for="form-url">URL</label>
+                            <input type="text" class="form-input" id="form-url" placeholder="http://localhost:3000/mcp">
+                        </div>
+                    </div>
+
+                    <!-- Stdio fields -->
+                    <div id="stdio-fields" style="display: none;">
+                        <div class="form-group">
+                            <label for="form-command">Command</label>
+                            <input type="text" class="form-input" id="form-command" placeholder="npx">
+                        </div>
+                        <div class="form-group">
+                            <label for="form-args">Arguments</label>
+                            <input type="text" class="form-input" id="form-args" placeholder="-y, @modelcontextprotocol/server-puppeteer">
+                            <p class="form-hint">Comma-separated</p>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="form-description">Description</label>
+                        <input type="text" class="form-input" id="form-description" placeholder="What this server provides">
+                    </div>
+
+                    <!-- Auth Headers -->
+                    <div class="form-group">
+                        <label for="form-auth-header">Authorization Header <span class="optional-tag">optional</span></label>
+                        <input type="text" class="form-input" id="form-auth-header" placeholder="Bearer your-token-here">
+                        <p class="form-hint">Sent as Authorization header to this backend</p>
+                    </div>
+
+                    <!-- Tool Filtering -->
+                    <div class="form-group">
+                        <label for="form-tools-include">Tool Filter — Include <span class="optional-tag">optional</span></label>
+                        <input type="text" class="form-input" id="form-tools-include" placeholder="tool_a, tool_b">
+                        <p class="form-hint">Comma-separated list. Only these tools will be exposed. Leave empty to expose all.</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="form-tools-exclude">Tool Filter — Exclude <span class="optional-tag">optional</span></label>
+                        <input type="text" class="form-input" id="form-tools-exclude" placeholder="tool_c, tool_d">
+                        <p class="form-hint">Comma-separated list. These tools will be hidden. Ignored if include is set.</p>
+                    </div>
+
+                    <div class="form-group">
+                        <div class="form-toggle">
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="form-lazy" checked>
+                                <span class="toggle-slider"></span>
+                            </label>
+                            <span class="toggle-label">Lazy schema loading</span>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" id="modal-cancel">Cancel</button>
+                <button type="button" class="btn btn-primary" id="modal-save"><i class="fas fa-save"></i> Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm Delete Dialog -->
+    <div class="confirm-overlay" id="confirm-overlay">
+        <div class="confirm-dialog">
+            <h3><i class="fas fa-exclamation-triangle" style="color: var(--danger-color);"></i> Remove Backend</h3>
+            <p id="confirm-message">Are you sure?</p>
+            <div class="confirm-actions">
+                <button type="button" class="btn btn-secondary" id="confirm-cancel">Cancel</button>
+                <button type="button" class="btn btn-danger" id="confirm-delete"><i class="fas fa-trash"></i> Remove</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="static/js/app.js"></script>
+</body>
+</html>

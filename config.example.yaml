@@ -1,0 +1,67 @@
+# MCP Gateway - Example Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Copy this file to config.yaml and adjust to match your setup.
+# Environment variables are supported: ${VAR_NAME:-default_value}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+gateway:
+  host: "0.0.0.0"
+  port: 8080
+  log_level: "info"
+  tool_cache_ttl: 300              # Re-discover tools every 5 minutes
+  lazy_schema_loading: true        # Only fetch schemas when tools are called
+
+  # ─── Authentication ────────────────────────────────────────────────────
+  # When set, all API/MCP requests require this key (except /health, /, /static)
+  # Clients send it as: X-API-Key header, Authorization: Bearer header, or ?api_key= param
+  # api_key: "${MCP_GATEWAY_API_KEY}"
+
+  # ─── Persistence ──────────────────────────────────────────────────────
+  state_file: "state.json"         # Backends added via API are saved here
+
+  # ─── Auto-Reconnect ───────────────────────────────────────────────────
+  auto_reconnect: true             # Retry disconnected backends automatically
+  reconnect_interval: 30           # Base interval in seconds (exponential backoff applies)
+
+backends:
+  # ─── HTTP (Streamable HTTP / JSON-RPC POST) ───────────────────────────
+  - name: fleet-management
+    url: "http://host.docker.internal:3001/mcp"
+    transport: "http"
+    description: "Fleet management - routers, groups, accounts, locations"
+    lazy: true
+    # Auth header sent to this backend:
+    # headers:
+    #   Authorization: "Bearer ${FLEET_TOKEN}"
+    # Tool filtering (expose only specific tools):
+    # tools:
+    #   include: ["get_routers", "get_groups", "get_accounts"]
+
+  - name: monitoring
+    url: "http://host.docker.internal:3002/mcp"
+    transport: "http"
+    description: "Monitoring - net devices, metrics, alerts, speed tests"
+    lazy: true
+
+  - name: cloud-services
+    url: "http://host.docker.internal:3003/mcp"
+    transport: "http"
+    description: "Cloud services - users, subscriptions, networks, radios"
+    lazy: true
+    # Exclude specific tools:
+    # tools:
+    #   exclude: ["manage_network", "manage_radio"]
+
+  # ─── SSE (Server-Sent Events) ─────────────────────────────────────────
+  - name: ncm-sse
+    url: "http://host.docker.internal:3000/sse"
+    transport: "sse"
+    description: "NCM unified server via SSE transport"
+    lazy: true
+
+  # ─── Stdio (Subprocess) ───────────────────────────────────────────────
+  - name: puppeteer
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-puppeteer"]
+    description: "Browser automation - screenshots, navigation, form filling"
+    lazy: true
