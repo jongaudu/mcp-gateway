@@ -15,6 +15,7 @@
             <div class="header-content">
                 <div class="logo-section">
                     <h1 id="app-title"><i class="fas fa-network-wired"></i> MCP Gateway</h1>
+                    <span class="mode-badge" id="mode-badge" title="Gateway operating mode"></span>
                     <span class="live-dot" id="live-dot" title="WebSocket connected"></span>
                 </div>
                 <div class="header-actions">
@@ -64,7 +65,11 @@
                             </div>
                             <div class="stat-card">
                                 <div class="stat-icon info"><i class="fas fa-wrench"></i></div>
-                                <div class="stat-content"><h3 id="stat-tools">0</h3><p>Tools</p></div>
+                                <div class="stat-content"><h3 id="stat-tools">0</h3><p>Tools (internal)</p></div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-icon meta"><i class="fas fa-compress-arrows-alt"></i></div>
+                                <div class="stat-content"><h3 id="stat-exposed">0</h3><p>Exposed to LLM</p></div>
                             </div>
                             <div class="stat-card">
                                 <div class="stat-icon warning"><i class="fas fa-exchange-alt"></i></div>
@@ -113,6 +118,14 @@
                     <section id="view-settings" style="display: none;">
                         <h2 class="section-title">Settings</h2>
                         <div class="settings-panel">
+                            <div class="settings-card">
+                                <h3><i class="fas fa-layer-group"></i> Gateway Mode</h3>
+                                <p class="form-hint">Controls how tools are exposed to the AI harness. "meta" exposes 3 meta-tools (discover, describe, execute) for ~90% token savings. "proxy" exposes all upstream tools directly.</p>
+                                <div class="form-group">
+                                    <label>Current Mode</label>
+                                    <span id="mode-status" class="badge badge-lazy">proxy</span>
+                                </div>
+                            </div>
                             <div class="settings-card">
                                 <h3><i class="fas fa-key"></i> Gateway API Key</h3>
                                 <p class="form-hint">When set, all API and MCP requests require this key. Configure in config.yaml or environment.</p>

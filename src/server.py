@@ -18,6 +18,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .config import BackendServer, GatewayConfig, ToolFilter, load_config
+from .meta_tools import MetaToolDispatcher
 from .persistence import StateManager
 from .registry import ToolRegistry
 
@@ -79,6 +80,7 @@ class MCPGatewayServer:
         self._config = config
         self._registry = ToolRegistry(config)
         self._state_manager = StateManager(config.state_file)
+        self._meta_dispatcher = MetaToolDispatcher(self._registry)
         self._request_id = 0
 
     async def start(self) -> None:
@@ -96,9 +98,15 @@ class MCPGatewayServer:
         self._save_state()
 
         logger.info(
-            f"Gateway ready: {self._registry.tool_count} tools from "
+            f"Gateway ready ({self._config.mode} mode): "
+            f"{self._registry.tool_count} tools from "
             f"{self._registry.backend_count} backends"
         )
+        if self._config.mode == "meta":
+            logger.info(
+                "Meta-tool mode active: exposing 3 meta-tools "
+                "(discover, describe, execute) instead of all upstream tools"
+            )
 
     async def stop(self) -> None:
         """Shut down the gateway and persist state."""
@@ -158,6 +166,11 @@ class MCPGatewayServer:
         }
 
     async def _handle_tools_list(self, params: dict) -> dict[str, Any]:
+        # In meta mode, expose only the meta-tools (discover, describe, execute)
+        if self._config.mode == "meta":
+            return {"tools": self._meta_dispatcher.get_tool_definitions()}
+
+        # Proxy mode: expose all upstream tools directly
         await self._registry.refresh_if_stale()
         include_schemas = not self._config.lazy_schema_loading
         tools = await self._registry.list_tools(include_schemas=include_schemas)
@@ -168,6 +181,11 @@ class MCPGatewayServer:
         arguments = params.get("arguments", {})
         if not tool_name:
             raise ValueError("Missing 'name' in tools/call params")
+
+        # In meta mode, route meta-tool calls to the dispatcher
+        if self._config.mode == "meta" and self._meta_dispatcher.is_meta_tool(tool_name):
+            return await self._meta_dispatcher.handle_call(tool_name, arguments)
+
         result = await self._registry.call_tool(tool_name, arguments)
         return result
 
@@ -189,8 +207,14 @@ class MCPGatewayServer:
         return JSONResponse(
             {
                 "status": "healthy" if all_healthy else "degraded",
+                "mode": self._config.mode,
                 "backends": status,
                 "tools": self._registry.tool_count,
+                "exposed_tools": (
+                    len(self._meta_dispatcher.get_tool_definitions())
+                    if self._config.mode == "meta"
+                    else self._registry.tool_count
+                ),
             },
             status_code=200 if all_healthy else 503,
         )

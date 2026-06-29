@@ -98,6 +98,7 @@ class GatewayConfig:
     state_file: str = "state.json"  # Persistent state file path
     auto_reconnect: bool = True  # Auto-reconnect disconnected backends
     reconnect_interval: int = 30  # Seconds between reconnect attempts
+    mode: str = "proxy"  # "proxy" (expose all upstream tools) or "meta" (expose meta-tools only)
 
 
 # Regex to match ${VAR_NAME} or ${VAR_NAME:-default_value}
@@ -195,6 +196,10 @@ def _parse_config(path: Path) -> GatewayConfig:
 
     backends = [_parse_backend(b) for b in backends_raw]
 
+    mode = gateway_section.get("mode", "proxy")
+    if mode not in ("proxy", "meta"):
+        raise ValueError(f"Invalid gateway mode: '{mode}'. Must be 'proxy' or 'meta'.")
+
     return GatewayConfig(
         host=gateway_section.get("host", "0.0.0.0"),
         port=int(gateway_section.get("port", 8080)),
@@ -206,4 +211,5 @@ def _parse_config(path: Path) -> GatewayConfig:
         state_file=gateway_section.get("state_file", "state.json"),
         auto_reconnect=gateway_section.get("auto_reconnect", True),
         reconnect_interval=int(gateway_section.get("reconnect_interval", 30)),
+        mode=mode,
     )

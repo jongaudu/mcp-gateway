@@ -8,6 +8,7 @@ A Python-based MCP (Model Context Protocol) proxy/gateway that consolidates mult
 
 | Feature | Description |
 |---------|-------------|
+| **Meta-Tool Mode** | Expose only 3 meta-tools instead of 43+. ~90% token savings with full capability. |
 | Lazy Schema Loading | Tool schemas fetched only when called, not at discovery. 60-80% token savings. |
 | Multi-Protocol | HTTP (Streamable), SSE, and Stdio backends supported |
 | Dynamic Management | Add/remove backends at runtime via API or Web UI |
@@ -100,6 +101,7 @@ gateway:
   auto_reconnect: true
   reconnect_interval: 30
   api_key: "${MCP_GATEWAY_API_KEY}"  # Optional
+  mode: "meta"  # "proxy" (all tools) or "meta" (3 meta-tools, ~92% token savings)
 
 backends:
   - name: my-server
@@ -268,6 +270,51 @@ curl -X POST http://localhost:8080/admin/restore \
 3. Your harness sees a minimal tool listing (huge token savings)
 4. When a tool is called, the gateway routes it directly — schemas aren't needed for routing
 
+## Meta-Tool Mode (Maximum Token Savings)
+
+Meta-tool mode is the most aggressive token optimization. Instead of exposing all upstream tools to the LLM (even with lazy loading, each tool still consumes ~150 tokens of schema in the system prompt), meta mode exposes only **3 generic tools**:
+
+| Meta-Tool | Purpose |
+|-----------|---------|
+| `mcp_gateway_discover` | Find tools by backend or keyword — returns names + descriptions |
+| `mcp_gateway_describe` | Get full parameter schema for a specific tool (on-demand) |
+| `mcp_gateway_execute` | Call any upstream tool by name with arguments |
+
+### Token Comparison
+
+| Mode | Tools in Context | Approx. Tokens | Savings |
+|------|-----------------|---------------|---------|
+| No gateway (4 servers) | 43 full schemas | ~6,500 | — |
+| Proxy mode | 43 (lazy, no schemas) | ~4,500 | ~30% |
+| **Meta mode** | 3 meta-tool schemas | ~500 | **~92%** |
+
+### How It Works
+
+```
+LLM                        Gateway                    Upstream Servers
+ │                           │                              │
+ │─ discover(query="radio")──│                              │
+ │                           │── (searches internal registry)│
+ │◀─ get_radios, manage_radio│                              │
+ │                           │                              │
+ │─ describe("get_radios") ──│                              │
+ │                           │── tools/list ───────────────▶│
+ │◀─ {radio_id, network...} │◀─────────────────────────────│
+ │                           │                              │
+ │─ execute("get_radios",    │                              │
+ │    {network: "..."})     ─│── tools/call("get_radios")──▶│
+ │◀─ [radio results]        │◀─────────────────────────────│
+```
+
+### Configuration
+
+```yaml
+gateway:
+  mode: "meta"    # "proxy" (default) or "meta"
+```
+
+The gateway still connects to all backends and discovers all tools internally — it just doesn't expose them to the client. Switch back to `mode: "proxy"` at any time without losing functionality.
+
 ## Project Structure
 
 ```
@@ -276,6 +323,7 @@ mcp_gateway/
 │   ├── __init__.py
 │   ├── __main__.py        # CLI entrypoint
 │   ├── config.py          # YAML + env var config, ToolFilter, BackendServer
+│   ├── meta_tools.py      # Meta-tool definitions + dispatcher (discover/describe/execute)
 │   ├── transport.py       # HTTP, SSE, and Stdio transports with auth headers
 │   ├── registry.py        # Tool registry, metrics, auto-reconnect, WebSocket events
 │   ├── persistence.py     # State file management, backup/restore

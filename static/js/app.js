@@ -232,11 +232,31 @@ class MCPGatewayApp {
         const total = this.backends.length;
         const connected = this.backends.filter(b => b.connected).length;
         const tools = this.health ? this.health.tools : 0;
+        const exposed = this.health ? (this.health.exposed_tools || tools) : 0;
+        const mode = this.health ? (this.health.mode || 'proxy') : 'proxy';
         const calls = this.metrics ? this.metrics.total_calls : 0;
         document.getElementById('stat-backends').textContent = total;
         document.getElementById('stat-connected').textContent = connected;
         document.getElementById('stat-tools').textContent = tools;
+        document.getElementById('stat-exposed').textContent = exposed;
         document.getElementById('stat-calls').textContent = calls;
+
+        // Update mode badge in header
+        const modeBadge = document.getElementById('mode-badge');
+        if (modeBadge) {
+            modeBadge.textContent = mode.toUpperCase();
+            modeBadge.className = 'mode-badge mode-' + mode;
+            modeBadge.title = mode === 'meta'
+                ? 'Meta mode: 3 meta-tools exposed (discover, describe, execute)'
+                : 'Proxy mode: all upstream tools exposed directly';
+        }
+
+        // Update mode in settings
+        const modeStatus = document.getElementById('mode-status');
+        if (modeStatus) {
+            modeStatus.textContent = mode;
+            modeStatus.className = mode === 'meta' ? 'badge badge-meta' : 'badge badge-lazy';
+        }
     }
 
     renderDashboardBackends() {

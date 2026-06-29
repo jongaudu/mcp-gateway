@@ -16,6 +16,13 @@ gateway:
   # Clients send it as: X-API-Key header, Authorization: Bearer header, or ?api_key= param
   # api_key: "${MCP_GATEWAY_API_KEY}"
 
+  # ─── Gateway Mode ─────────────────────────────────────────────────────
+  # "proxy" - Expose all upstream tools directly to the AI harness (default)
+  # "meta"  - Expose only 3 meta-tools (discover, describe, execute)
+  #           The LLM uses discover to find tools, describe to get schemas,
+  #           and execute to call them. ~92% token savings vs proxy mode.
+  mode: "meta"
+
   # ─── Persistence ──────────────────────────────────────────────────────
   state_file: "state.json"         # Backends added via API are saved here
 
