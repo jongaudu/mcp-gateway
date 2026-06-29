@@ -280,8 +280,14 @@ class ToolRegistry:
         return results
 
     async def list_tools(self, include_schemas: bool = False) -> list[dict[str, Any]]:
-        """Return all registered tools."""
+        """Return all registered tools.
+
+        The MCP spec requires inputSchema on every tool. When lazy loading is
+        enabled and include_schemas is False, we still provide a minimal valid
+        schema so clients pass validation.
+        """
         tools = []
+        _empty_schema: dict[str, Any] = {"type": "object", "properties": {}}
         for backend_state in self._backends.values():
             for entry in backend_state.tools.values():
                 tool_info: dict[str, Any] = {
@@ -290,11 +296,13 @@ class ToolRegistry:
                     "backend": entry.backend_name,
                 }
                 if include_schemas and entry.schema_loaded:
-                    tool_info["inputSchema"] = entry.input_schema
+                    tool_info["inputSchema"] = entry.input_schema or _empty_schema
                 elif include_schemas and not entry.schema_loaded:
                     schema = await self._load_schema(entry)
-                    if schema:
-                        tool_info["inputSchema"] = schema
+                    tool_info["inputSchema"] = schema or _empty_schema
+                else:
+                    # Always include inputSchema to satisfy MCP spec validation
+                    tool_info["inputSchema"] = entry.input_schema or _empty_schema
                 tools.append(tool_info)
         return tools
 

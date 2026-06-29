@@ -57,18 +57,26 @@ class HttpTransport(BackendTransport):
         self._base_url = config.url.rstrip("/") if config.url else ""
         self._request_id = 0
         self._headers = dict(config.headers) if config.headers else {}
+        self._session_id: Optional[str] = None
 
     async def connect(self) -> None:
-        self._client = httpx.AsyncClient(timeout=60.0, headers=self._headers)
+        # MCP Streamable HTTP spec requires Accept header for content negotiation
+        default_headers = {
+            "Accept": "application/json, text/event-stream",
+        }
+        default_headers.update(self._headers)
+        self._client = httpx.AsyncClient(timeout=60.0, headers=default_headers)
         logger.debug(f"HTTP transport connecting to {self._base_url}")
 
-        # Send initialize handshake
+        # Send initialize handshake and capture session ID
         try:
             await self._send_request("initialize", {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
                 "clientInfo": {"name": "mcp-gateway", "version": "1.0.0"},
             })
+            # Send initialized notification after successful handshake
+            await self._send_notification("notifications/initialized", {})
         except Exception as e:
             logger.warning(f"HTTP initialize handshake failed (non-fatal): {e}")
 
@@ -76,6 +84,7 @@ class HttpTransport(BackendTransport):
         if self._client:
             await self._client.aclose()
             self._client = None
+        self._session_id = None
 
     async def list_tools(self) -> list[dict[str, Any]]:
         result = await self._send_request("tools/list", {})
@@ -87,8 +96,37 @@ class HttpTransport(BackendTransport):
             "arguments": arguments,
         })
 
+    async def _send_notification(self, method: str, params: dict) -> None:
+        """Send a JSON-RPC notification (no id, no response expected)."""
+        if not self._client:
+            raise ConnectionError("Not connected")
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }
+
+        headers = {}
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+
+        response = await self._client.post(
+            self._base_url, json=payload, headers=headers
+        )
+        # Notifications may return 200/202/204 — all acceptable
+        if response.status_code >= 400:
+            logger.debug(f"Notification {method} returned {response.status_code}")
+
     async def _send_request(self, method: str, params: dict) -> dict[str, Any]:
-        """Send a JSON-RPC request via HTTP POST."""
+        """Send a JSON-RPC request via HTTP POST.
+
+        Handles MCP Streamable HTTP session management:
+        - Captures Mcp-Session-Id from responses
+        - Sends session ID on subsequent requests
+        - Handles SSE stream responses (server may respond with text/event-stream)
+        - Handles empty response bodies (202/200 with no content)
+        """
         if not self._client:
             raise ConnectionError("Not connected")
 
@@ -100,14 +138,76 @@ class HttpTransport(BackendTransport):
             "params": params,
         }
 
-        response = await self._client.post(self._base_url, json=payload)
+        # Include session ID if we have one from a previous response
+        headers = {}
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+
+        response = await self._client.post(
+            self._base_url, json=payload, headers=headers
+        )
         response.raise_for_status()
+
+        # Capture session ID from response headers (per Streamable HTTP spec)
+        session_id = response.headers.get("mcp-session-id")
+        if session_id:
+            self._session_id = session_id
+
+        content_type = response.headers.get("content-type", "")
+
+        # Server responds with SSE stream — parse events to find the JSON-RPC response
+        if "text/event-stream" in content_type:
+            return self._parse_sse_response(response.text)
+
+        # Handle empty body (some servers return 200/202 with no content for initialize)
+        body = response.text.strip()
+        if not body:
+            return {}
+
         result = response.json()
 
         if "error" in result:
             raise RuntimeError(f"Backend error: {result['error']}")
 
         return result.get("result", {})
+
+    def _parse_sse_response(self, text: str) -> dict[str, Any]:
+        """Parse an SSE response body to extract the JSON-RPC result.
+
+        SSE format:
+            event: message
+            data: {"jsonrpc": "2.0", "id": 1, "result": {...}}
+        """
+        data_lines = []
+        for line in text.split("\n"):
+            if line.startswith("data:"):
+                data_lines.append(line[5:].strip())
+            elif line == "" and data_lines:
+                # End of an event — try to parse accumulated data
+                raw = "\n".join(data_lines)
+                data_lines = []
+                try:
+                    message = json.loads(raw)
+                    if "error" in message:
+                        raise RuntimeError(f"Backend error: {message['error']}")
+                    if "result" in message:
+                        return message["result"]
+                except json.JSONDecodeError:
+                    continue
+
+        # Try any remaining data lines (if stream didn't end with blank line)
+        if data_lines:
+            raw = "\n".join(data_lines)
+            try:
+                message = json.loads(raw)
+                if "error" in message:
+                    raise RuntimeError(f"Backend error: {message['error']}")
+                if "result" in message:
+                    return message["result"]
+            except json.JSONDecodeError:
+                pass
+
+        return {}
 
 
 class SseTransport(BackendTransport):
