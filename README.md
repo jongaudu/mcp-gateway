@@ -1,5 +1,7 @@
 # MCP Gateway
 
+![MCP Gateway Screenshot](screenshot.png)
+
 A Python-based MCP (Model Context Protocol) proxy/gateway that consolidates multiple backend MCP servers behind a single endpoint. Built for **token optimization**, **dynamic management**, and **production reliability**.
 
 ## Key Features
