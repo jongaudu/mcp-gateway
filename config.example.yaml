@@ -31,44 +31,42 @@ gateway:
   reconnect_interval: 30           # Base interval in seconds (exponential backoff applies)
 
 backends:
-  # ─── HTTP (Streamable HTTP / JSON-RPC POST) ───────────────────────────
-  - name: fleet-management
-    url: "http://host.docker.internal:3001/mcp"
+  # ─── NCM MCP Servers (Streamable HTTP, stateless 2026-07-28) ──────────
+  # These servers support both MCP 2026-07-28 (stateless) and legacy protocols.
+  # The gateway auto-detects the protocol era on connect — no config needed.
+  # Set protocol_version: "2026-07-28" to force stateless (skip auto-detection).
+
+  - name: ncm-fleet
+    url: "http://localhost:3001/mcp"
     transport: "http"
-    description: "Fleet management - routers, groups, accounts, locations"
+    description: "Fleet management - routers, groups, accounts, locations, configurations, firmware"
     lazy: true
-    # Auth header sent to this backend:
+    # protocol_version: "auto"     # Default: auto-detects 2026-07-28 from ncm_mcp_servers
     # headers:
     #   Authorization: "Bearer ${FLEET_TOKEN}"
-    # Tool filtering (expose only specific tools):
     # tools:
     #   include: ["get_routers", "get_groups", "get_accounts"]
 
-  - name: monitoring
-    url: "http://host.docker.internal:3002/mcp"
+  - name: ncm-monitoring
+    url: "http://localhost:3002/mcp"
     transport: "http"
-    description: "Monitoring - net devices, metrics, alerts, speed tests"
+    description: "Monitoring - net devices, health metrics, alerts, speed tests"
     lazy: true
 
-  - name: cloud-services
-    url: "http://host.docker.internal:3003/mcp"
+  - name: ncm-cloud-services
+    url: "http://localhost:3003/mcp"
     transport: "http"
-    description: "Cloud services - users, subscriptions, networks, radios"
+    description: "Cloud services - users, subscriptions, private cellular, exchange"
     lazy: true
-    # Exclude specific tools:
     # tools:
     #   exclude: ["manage_network", "manage_radio"]
 
-  # ─── SSE (Server-Sent Events) ─────────────────────────────────────────
-  - name: ncm-sse
-    url: "http://host.docker.internal:3000/sse"
-    transport: "sse"
-    description: "NCM unified server via SSE transport"
-    lazy: true
+  # ─── Puppeteer (Stdio subprocess) ─────────────────────────────────────
+  # Browser automation spawned as a child process. Communicates over stdin/stdout.
+  # Requires npx (Node.js) on the PATH.
 
-  # ─── Stdio (Subprocess) ───────────────────────────────────────────────
   - name: puppeteer
     command: "npx"
     args: ["-y", "@modelcontextprotocol/server-puppeteer"]
-    description: "Browser automation - screenshots, navigation, form filling"
+    description: "Browser automation - screenshots, navigation, clicks, form filling"
     lazy: true

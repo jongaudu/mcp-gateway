@@ -8,9 +8,11 @@ A Python-based MCP (Model Context Protocol) proxy/gateway that consolidates mult
 
 | Feature | Description |
 |---------|-------------|
+| **Stateless MCP (2026-07-28)** | Full support for the stateless protocol — no handshake, no sessions, load-balancer friendly |
+| **Dual Protocol** | Serves both 2026-07-28 (stateless) and legacy (2025-11-25/2024-11-05) clients on the same endpoint |
 | **Meta-Tool Mode** | Expose only 3 meta-tools instead of 43+. ~90% token savings with full capability. |
 | Lazy Schema Loading | Tool schemas fetched only when called, not at discovery. 60-80% token savings. |
-| Multi-Protocol | HTTP (Streamable), SSE, and Stdio backends supported |
+| Multi-Protocol Backends | HTTP (Streamable), SSE, and Stdio backends supported — auto-detects protocol era |
 | Dynamic Management | Add/remove backends at runtime via API or Web UI |
 | Web Dashboard | Built-in UI for CRUD, monitoring, search, and backup/restore |
 | Tool Filtering | Include/exclude lists per backend to control what's exposed |
@@ -20,6 +22,7 @@ A Python-based MCP (Model Context Protocol) proxy/gateway that consolidates mult
 | Authentication | Gateway API key + per-backend auth headers |
 | Live Status | WebSocket feed for real-time backend status changes |
 | Backup/Restore | Export and import full gateway state |
+| Cache Hints | Responds with `ttlMs`/`cacheScope` on tools/list for smart client caching |
 
 ## Architecture
 
@@ -129,13 +132,41 @@ Values in config.yaml support `${VAR}` and `${VAR:-default}` syntax.
 
 ## Transport Protocols
 
-| Transport | Config | Auto-Detection |
-|-----------|--------|----------------|
-| HTTP (Streamable) | `url: "http://.../mcp"` | Default for URL-based |
-| SSE | `url: "http://.../sse"` | Auto if URL contains `/sse` |
-| Stdio | `command: "npx"` + `args: [...]` | Auto if `command` is set |
+| Transport | Config | Auto-Detection | Protocol Eras |
+|-----------|--------|----------------|---------------|
+| HTTP (Streamable) | `url: "http://.../mcp"` | Default for URL-based | 2026-07-28 + legacy (auto-detected) |
+| SSE | `url: "http://.../sse"` | Auto if URL contains `/sse` | Legacy only |
+| Stdio | `command: "npx"` + `args: [...]` | Auto if `command` is set | Legacy only |
 
 Override auto-detection with explicit `transport: "http"`, `"sse"`, or `"stdio"`.
+
+### Protocol Version (Backend)
+
+The gateway auto-detects each backend's protocol era by trying `server/discover` first (2026-07-28), then falling back to the `initialize` handshake. Override this with `protocol_version`:
+
+```yaml
+backends:
+  - name: modern-server
+    url: "http://localhost:3001/mcp"
+    protocol_version: "2026-07-28"   # Force stateless (no fallback)
+
+  - name: legacy-server
+    url: "http://localhost:3002/mcp"
+    protocol_version: "2025-11-25"   # Force legacy (skip probe)
+
+  - name: auto-server
+    url: "http://localhost:3003/mcp"
+    protocol_version: "auto"         # Default: try modern, fall back to legacy
+```
+
+### Protocol Version (Clients)
+
+The gateway serves **both protocol eras on the same `/mcp` endpoint**:
+
+- **2026-07-28 clients** send `MCP-Protocol-Version: 2026-07-28` header → stateless response with `server/discover` support, no session
+- **Legacy clients** send an `initialize` request → session-based response as before
+
+No configuration needed — era detection is per-request.
 
 ## Tool Filtering
 

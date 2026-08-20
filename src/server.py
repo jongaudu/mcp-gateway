@@ -1,4 +1,11 @@
-"""MCP Gateway Server - the main entry point for the proxy."""
+"""MCP Gateway Server - the main entry point for the proxy.
+
+Supports both MCP protocol eras:
+- 2026-07-28 (stateless): No handshake, self-describing requests via _meta and headers
+- 2025-11-25 and earlier (legacy): initialize/initialized handshake with sessions
+
+Protocol version is auto-detected per request based on the MCP-Protocol-Version header.
+"""
 
 import asyncio
 import json
@@ -23,6 +30,13 @@ from .persistence import StateManager
 from .registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+# Protocol version constants
+PROTOCOL_2026 = "2026-07-28"
+PROTOCOL_2025 = "2025-11-25"
+PROTOCOL_2024 = "2024-11-05"
+SUPPORTED_VERSIONS = [PROTOCOL_2026, PROTOCOL_2025, PROTOCOL_2024]
+LATEST_PROTOCOL_VERSION = PROTOCOL_2026
 
 
 # ─── Auth Middleware ─────────────────────────────────────────────────────────
@@ -74,7 +88,12 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 
 
 class MCPGatewayServer:
-    """MCP-compliant gateway server that proxies tool calls to backend servers."""
+    """MCP-compliant gateway server that proxies tool calls to backend servers.
+
+    Supports both the 2026-07-28 stateless protocol and legacy session-based
+    protocol. Protocol era is detected per-request from the MCP-Protocol-Version
+    header; requests without the header are treated as legacy.
+    """
 
     def __init__(self, config: GatewayConfig):
         self._config = config
@@ -102,6 +121,10 @@ class MCPGatewayServer:
             f"{self._registry.tool_count} tools from "
             f"{self._registry.backend_count} backends"
         )
+        logger.info(
+            f"Protocol support: {PROTOCOL_2026} (stateless) + "
+            f"{PROTOCOL_2025}/{PROTOCOL_2024} (legacy)"
+        )
         if self._config.mode == "meta":
             logger.info(
                 "Meta-tool mode active: exposing 3 meta-tools "
@@ -121,20 +144,80 @@ class MCPGatewayServer:
 
     # ─── MCP Protocol Endpoint ────────────────────────────────────────────
 
-    async def handle_mcp(self, request: Request) -> JSONResponse:
-        """Handle JSON-RPC MCP requests."""
+    async def handle_mcp(self, request: Request) -> Response:
+        """Handle JSON-RPC MCP requests with dual-protocol support.
+
+        Detection logic:
+        - If MCP-Protocol-Version header is "2026-07-28" → stateless path
+        - Otherwise → legacy path (initialize handshake expected)
+        """
         try:
             body = await request.json()
         except Exception:
             return self._error_response(None, -32700, "Parse error")
 
+        # Detect protocol era from header
+        protocol_version = request.headers.get("mcp-protocol-version", "")
         method = body.get("method")
         request_id = body.get("id")
         params = body.get("params", {})
 
-        logger.debug(f"Received: {method} (id={request_id})")
+        # Also check Mcp-Method header (2026-07-28 requires it)
+        header_method = request.headers.get("mcp-method", "")
+        header_name = request.headers.get("mcp-name", "")
 
-        handler = self._get_handler(method)
+        # If we see the 2026 protocol header, use stateless handling
+        is_modern = protocol_version == PROTOCOL_2026
+
+        logger.debug(
+            f"Received: {method} (id={request_id}, "
+            f"protocol={'2026-stateless' if is_modern else 'legacy'})"
+        )
+
+        if is_modern:
+            return await self._handle_modern_request(method, request_id, params, body)
+        else:
+            return await self._handle_legacy_request(method, request_id, params)
+
+    async def _handle_modern_request(
+        self, method: str, request_id: Any, params: dict, body: dict
+    ) -> Response:
+        """Handle a 2026-07-28 stateless request.
+
+        No session, no initialize handshake. Each request is self-describing
+        with client info in params._meta.
+        """
+        handler = self._get_modern_handler(method)
+        if not handler:
+            return self._jsonrpc_response(
+                request_id,
+                error={"code": -32601, "message": f"Unknown method: {method}"},
+                protocol_version=PROTOCOL_2026,
+                method=method,
+            )
+
+        try:
+            result = await handler(params)
+            return self._jsonrpc_response(
+                request_id,
+                result=result,
+                protocol_version=PROTOCOL_2026,
+                method=method,
+            )
+        except Exception as e:
+            logger.exception(f"Error handling {method}")
+            return self._jsonrpc_response(
+                request_id,
+                error={"code": -32000, "message": str(e)},
+                protocol_version=PROTOCOL_2026,
+                method=method,
+            )
+
+    async def _handle_legacy_request(
+        self, method: str, request_id: Any, params: dict
+    ) -> Response:
+        """Handle a legacy (pre-2026) request with session semantics."""
+        handler = self._get_legacy_handler(method)
         if not handler:
             return self._error_response(request_id, -32601, f"Unknown method: {method}")
 
@@ -149,7 +232,18 @@ class MCPGatewayServer:
             logger.exception(f"Error handling {method}")
             return self._error_response(request_id, -32000, str(e))
 
-    def _get_handler(self, method: str):
+    def _get_modern_handler(self, method: str):
+        """Route for 2026-07-28 protocol methods."""
+        handlers = {
+            "server/discover": self._handle_server_discover,
+            "tools/list": self._handle_tools_list,
+            "tools/call": self._handle_tools_call,
+            "ping": self._handle_ping,
+        }
+        return handlers.get(method)
+
+    def _get_legacy_handler(self, method: str):
+        """Route for legacy protocol methods."""
         handlers = {
             "initialize": self._handle_initialize,
             "tools/list": self._handle_tools_list,
@@ -158,25 +252,62 @@ class MCPGatewayServer:
         }
         return handlers.get(method)
 
-    async def _handle_initialize(self, params: dict) -> dict[str, Any]:
+    # ─── Protocol Handlers ────────────────────────────────────────────────
+
+    async def _handle_server_discover(self, params: dict) -> dict[str, Any]:
+        """Handle server/discover (2026-07-28).
+
+        Returns server capabilities and info without requiring a handshake.
+        This is the 2026-era replacement for initialize.
+        """
         return {
-            "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {"listChanged": True}},
-            "serverInfo": {"name": "mcp-gateway", "version": "2.0.0"},
+            "serverInfo": {"name": "mcp-gateway", "version": "2.1.0"},
+            "protocolVersion": PROTOCOL_2026,
+            "instructions": (
+                "MCP Gateway proxying tools from multiple backend servers. "
+                f"Mode: {self._config.mode}. "
+                f"Backends: {self._registry.backend_count}. "
+                f"Tools: {self._registry.tool_count}."
+            ),
+        }
+
+    async def _handle_initialize(self, params: dict) -> dict[str, Any]:
+        """Handle initialize (legacy protocol)."""
+        # Determine best protocol version to negotiate
+        client_version = params.get("protocolVersion", PROTOCOL_2024)
+        negotiated = client_version if client_version in SUPPORTED_VERSIONS else PROTOCOL_2024
+
+        return {
+            "protocolVersion": negotiated,
+            "capabilities": {"tools": {"listChanged": True}},
+            "serverInfo": {"name": "mcp-gateway", "version": "2.1.0"},
         }
 
     async def _handle_tools_list(self, params: dict) -> dict[str, Any]:
+        """Handle tools/list — shared by both protocol eras."""
         # In meta mode, expose only the meta-tools (discover, describe, execute)
         if self._config.mode == "meta":
-            return {"tools": self._meta_dispatcher.get_tool_definitions()}
+            tools = self._meta_dispatcher.get_tool_definitions()
+        else:
+            # Proxy mode: expose all upstream tools directly
+            await self._registry.refresh_if_stale()
+            include_schemas = not self._config.lazy_schema_loading
+            tools = await self._registry.list_tools(include_schemas=include_schemas)
 
-        # Proxy mode: expose all upstream tools directly
-        await self._registry.refresh_if_stale()
-        include_schemas = not self._config.lazy_schema_loading
-        tools = await self._registry.list_tools(include_schemas=include_schemas)
-        return {"tools": tools}
+        result: dict[str, Any] = {"tools": tools}
+
+        # Add cache hints for modern clients (SEP-2549)
+        if self._config.tool_cache_ttl > 0:
+            result["_meta"] = {
+                "ttlMs": self._config.tool_cache_ttl * 1000,
+                "cacheScope": "server",
+            }
+
+        return result
 
     async def _handle_tools_call(self, params: dict) -> dict[str, Any]:
+        """Handle tools/call — shared by both protocol eras."""
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
         if not tool_name:
@@ -190,9 +321,35 @@ class MCPGatewayServer:
         return result
 
     async def _handle_ping(self, params: dict) -> dict[str, Any]:
+        """Handle ping — shared by both protocol eras."""
         return {}
 
+    # ─── Response Helpers ─────────────────────────────────────────────────
+
+    def _jsonrpc_response(
+        self,
+        request_id: Any,
+        result: dict | None = None,
+        error: dict | None = None,
+        protocol_version: str = PROTOCOL_2026,
+        method: str = "",
+    ) -> JSONResponse:
+        """Build a JSON-RPC response with 2026-07-28 headers."""
+        if error:
+            body = {"jsonrpc": "2.0", "id": request_id, "error": error}
+        else:
+            body = {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+        headers = {
+            "MCP-Protocol-Version": protocol_version,
+        }
+        if method:
+            headers["Mcp-Method"] = method
+
+        return JSONResponse(body, headers=headers)
+
     def _error_response(self, request_id, code: int, message: str) -> JSONResponse:
+        """Legacy error response (no extra headers)."""
         return JSONResponse({
             "jsonrpc": "2.0",
             "id": request_id,
@@ -208,6 +365,7 @@ class MCPGatewayServer:
             {
                 "status": "healthy" if all_healthy else "degraded",
                 "mode": self._config.mode,
+                "protocol_versions": SUPPORTED_VERSIONS,
                 "backends": status,
                 "tools": self._registry.tool_count,
                 "exposed_tools": (

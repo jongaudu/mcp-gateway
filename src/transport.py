@@ -4,6 +4,10 @@ Supports three MCP transport protocols:
 - HTTP (Streamable HTTP): JSON-RPC over POST requests
 - SSE (Server-Sent Events): Persistent GET stream + POST for requests
 - Stdio: JSON-RPC over subprocess stdin/stdout
+
+The HTTP transport auto-detects the backend's protocol era:
+- 2026-07-28 (stateless): No handshake, self-describing requests with headers
+- 2025-11-25 and earlier (legacy): initialize/initialized handshake with sessions
 """
 
 import asyncio
@@ -18,6 +22,11 @@ import httpx
 from .config import BackendServer
 
 logger = logging.getLogger(__name__)
+
+# Protocol constants
+PROTOCOL_2026 = "2026-07-28"
+PROTOCOL_2025 = "2025-11-25"
+PROTOCOL_2024 = "2024-11-05"
 
 
 class BackendTransport(ABC):
@@ -43,12 +52,24 @@ class BackendTransport(ABC):
         """Invoke a tool on the backend."""
         ...
 
+    @property
+    def protocol_version(self) -> str:
+        """Return the negotiated protocol version."""
+        return PROTOCOL_2024
+
 
 class HttpTransport(BackendTransport):
     """Transport for Streamable HTTP MCP servers (JSON-RPC over POST).
 
-    This is the simplest protocol: send a JSON-RPC request as POST body,
-    receive a JSON-RPC response in the response body.
+    Supports both protocol eras:
+    - 2026-07-28: Stateless requests with MCP-Protocol-Version, Mcp-Method,
+      Mcp-Name headers. No initialize handshake, no session tracking.
+    - Legacy (2025-11-25 / 2024-11-05): initialize handshake, Mcp-Session-Id
+      tracking on subsequent requests.
+
+    Connection strategy:
+    1. Try server/discover (2026-07-28 style) first
+    2. If that fails (404/405/error), fall back to initialize handshake
     """
 
     def __init__(self, config: BackendServer):
@@ -58,9 +79,21 @@ class HttpTransport(BackendTransport):
         self._request_id = 0
         self._headers = dict(config.headers) if config.headers else {}
         self._session_id: Optional[str] = None
+        self._protocol_version: str = PROTOCOL_2024
+        self._is_modern: bool = False
+
+    @property
+    def protocol_version(self) -> str:
+        return self._protocol_version
 
     async def connect(self) -> None:
-        # MCP Streamable HTTP spec requires Accept header for content negotiation
+        """Connect to the backend, auto-detecting protocol version.
+
+        Behavior depends on config.protocol_version:
+        - "auto" (default): Try server/discover first, fall back to initialize
+        - "2026-07-28": Only use stateless protocol (no fallback)
+        - "2025-11-25" / "2024-11-05": Only use legacy handshake (no probe)
+        """
         default_headers = {
             "Accept": "application/json, text/event-stream",
         }
@@ -68,64 +101,179 @@ class HttpTransport(BackendTransport):
         self._client = httpx.AsyncClient(timeout=60.0, headers=default_headers)
         logger.debug(f"HTTP transport connecting to {self._base_url}")
 
-        # Send initialize handshake and capture session ID
+        forced_version = self._config.protocol_version
+
+        if forced_version == "2026-07-28":
+            # Force modern protocol — no fallback
+            if not await self._try_modern_connect():
+                raise ConnectionError(
+                    f"Backend {self._config.name} does not support 2026-07-28 "
+                    f"but protocol_version is forced to '2026-07-28'"
+                )
+            return
+
+        if forced_version in ("2025-11-25", "2024-11-05"):
+            # Force legacy — skip probe
+            await self._legacy_connect()
+            return
+
+        # Auto-detect: try modern first, fall back to legacy
+        if await self._try_modern_connect():
+            return
+
+        await self._legacy_connect()
+
+    async def _try_modern_connect(self) -> bool:
+        """Attempt a 2026-07-28 stateless connection via server/discover.
+
+        Returns True if the backend supports the modern protocol.
+        """
         try:
-            await self._send_request("initialize", {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "mcp-gateway", "version": "1.0.0"},
-            })
-            # Send initialized notification after successful handshake
-            await self._send_notification("notifications/initialized", {})
+            result = await self._send_modern_request("server/discover", {})
+            # If we get a valid response, the backend supports 2026-07-28
+            if isinstance(result, dict) and "capabilities" in result:
+                self._is_modern = True
+                self._protocol_version = PROTOCOL_2026
+                logger.info(
+                    f"Backend {self._config.name}: connected via 2026-07-28 (stateless)"
+                )
+                return True
         except Exception as e:
-            logger.warning(f"HTTP initialize handshake failed (non-fatal): {e}")
+            logger.debug(
+                f"Backend {self._config.name}: server/discover failed ({e}), "
+                f"trying legacy handshake"
+            )
+        return False
+
+    async def _legacy_connect(self) -> None:
+        """Connect using the legacy initialize/initialized handshake."""
+        try:
+            result = await self._send_legacy_request("initialize", {
+                "protocolVersion": PROTOCOL_2025,
+                "capabilities": {},
+                "clientInfo": {"name": "mcp-gateway", "version": "2.1.0"},
+            })
+            # Determine negotiated version
+            negotiated = result.get("protocolVersion", PROTOCOL_2024)
+            self._protocol_version = negotiated
+            self._is_modern = False
+
+            # Send initialized notification
+            await self._send_notification("notifications/initialized", {})
+
+            logger.info(
+                f"Backend {self._config.name}: connected via legacy handshake "
+                f"(protocol {negotiated})"
+            )
+        except Exception as e:
+            logger.warning(
+                f"HTTP initialize handshake failed for {self._config.name} "
+                f"(non-fatal): {e}"
+            )
 
     async def disconnect(self) -> None:
         if self._client:
             await self._client.aclose()
             self._client = None
         self._session_id = None
+        self._is_modern = False
 
     async def list_tools(self) -> list[dict[str, Any]]:
         result = await self._send_request("tools/list", {})
         return result.get("tools", [])
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        return await self._send_request("tools/call", {
-            "name": name,
-            "arguments": arguments,
-        })
+        return await self._send_request(
+            "tools/call",
+            {"name": name, "arguments": arguments},
+            tool_name=name,
+        )
 
-    async def _send_notification(self, method: str, params: dict) -> None:
-        """Send a JSON-RPC notification (no id, no response expected)."""
+    # ─── Request Dispatch ─────────────────────────────────────────────────
+
+    async def _send_request(
+        self, method: str, params: dict, tool_name: str = ""
+    ) -> dict[str, Any]:
+        """Send a request using the detected protocol era."""
+        if self._is_modern:
+            return await self._send_modern_request(method, params, tool_name)
+        else:
+            return await self._send_legacy_request(method, params)
+
+    async def _send_modern_request(
+        self, method: str, params: dict, tool_name: str = ""
+    ) -> dict[str, Any]:
+        """Send a 2026-07-28 stateless request with protocol headers.
+
+        Each request is self-describing:
+        - MCP-Protocol-Version header identifies the spec version
+        - Mcp-Method header carries the JSON-RPC method for gateway routing
+        - Mcp-Name header carries the tool/resource name (if applicable)
+        - _meta in params carries client identity and capabilities
+        """
         if not self._client:
             raise ConnectionError("Not connected")
 
-        payload = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
+        self._request_id += 1
+
+        # Inject _meta with client info (2026-07-28 requirement)
+        params_with_meta = dict(params)
+        params_with_meta.setdefault("_meta", {})
+        params_with_meta["_meta"]["io.modelcontextprotocol/clientInfo"] = {
+            "name": "mcp-gateway",
+            "version": "2.1.0",
         }
 
-        headers = {}
-        if self._session_id:
-            headers["Mcp-Session-Id"] = self._session_id
+        payload = {
+            "jsonrpc": "2.0",
+            "id": self._request_id,
+            "method": method,
+            "params": params_with_meta,
+        }
+
+        # 2026-07-28 required headers
+        headers = {
+            "MCP-Protocol-Version": PROTOCOL_2026,
+            "Mcp-Method": method,
+        }
+        if tool_name:
+            headers["Mcp-Name"] = tool_name
+        elif method == "tools/call" and "name" in params:
+            headers["Mcp-Name"] = params["name"]
 
         response = await self._client.post(
             self._base_url, json=payload, headers=headers
         )
-        # Notifications may return 200/202/204 — all acceptable
-        if response.status_code >= 400:
-            logger.debug(f"Notification {method} returned {response.status_code}")
+        response.raise_for_status()
 
-    async def _send_request(self, method: str, params: dict) -> dict[str, Any]:
-        """Send a JSON-RPC request via HTTP POST.
+        content_type = response.headers.get("content-type", "")
+
+        # Handle SSE response
+        if "text/event-stream" in content_type:
+            return self._parse_sse_response(response.text)
+
+        # Handle empty body
+        body = response.text.strip()
+        if not body:
+            return {}
+
+        result = response.json()
+
+        if "error" in result:
+            raise RuntimeError(f"Backend error: {result['error']}")
+
+        return result.get("result", {})
+
+    async def _send_legacy_request(
+        self, method: str, params: dict
+    ) -> dict[str, Any]:
+        """Send a legacy JSON-RPC request with session tracking.
 
         Handles MCP Streamable HTTP session management:
         - Captures Mcp-Session-Id from responses
         - Sends session ID on subsequent requests
-        - Handles SSE stream responses (server may respond with text/event-stream)
-        - Handles empty response bodies (202/200 with no content)
+        - Handles SSE stream responses
+        - Handles empty response bodies
         """
         if not self._client:
             raise ConnectionError("Not connected")
@@ -155,11 +303,11 @@ class HttpTransport(BackendTransport):
 
         content_type = response.headers.get("content-type", "")
 
-        # Server responds with SSE stream — parse events to find the JSON-RPC response
+        # Server responds with SSE stream
         if "text/event-stream" in content_type:
             return self._parse_sse_response(response.text)
 
-        # Handle empty body (some servers return 200/202 with no content for initialize)
+        # Handle empty body
         body = response.text.strip()
         if not body:
             return {}
@@ -170,6 +318,28 @@ class HttpTransport(BackendTransport):
             raise RuntimeError(f"Backend error: {result['error']}")
 
         return result.get("result", {})
+
+    async def _send_notification(self, method: str, params: dict) -> None:
+        """Send a JSON-RPC notification (no id, no response expected)."""
+        if not self._client:
+            raise ConnectionError("Not connected")
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }
+
+        headers = {}
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+
+        response = await self._client.post(
+            self._base_url, json=payload, headers=headers
+        )
+        # Notifications may return 200/202/204 — all acceptable
+        if response.status_code >= 400:
+            logger.debug(f"Notification {method} returned {response.status_code}")
 
     def _parse_sse_response(self, text: str) -> dict[str, Any]:
         """Parse an SSE response body to extract the JSON-RPC result.
@@ -219,7 +389,8 @@ class SseTransport(BackendTransport):
     3. Client sends JSON-RPC requests via POST to that session URL
     4. Server sends responses as SSE 'message' events on the GET stream
 
-    This transport handles the full lifecycle including reconnection.
+    Note: SSE transport is legacy (deprecated in 2025-03-26 spec revision).
+    It does not support the 2026-07-28 stateless protocol.
     """
 
     def __init__(self, config: BackendServer):
@@ -232,6 +403,10 @@ class SseTransport(BackendTransport):
         self._sse_task: Optional[asyncio.Task] = None
         self._connected_event = asyncio.Event()
         self._headers = dict(config.headers) if config.headers else {}
+
+    @property
+    def protocol_version(self) -> str:
+        return PROTOCOL_2024
 
     async def connect(self) -> None:
         """Open SSE stream and wait for the endpoint event."""
@@ -255,9 +430,9 @@ class SseTransport(BackendTransport):
         # Send initialize
         try:
             await self._send_request("initialize", {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": PROTOCOL_2024,
                 "capabilities": {},
-                "clientInfo": {"name": "mcp-gateway", "version": "1.0.0"},
+                "clientInfo": {"name": "mcp-gateway", "version": "2.1.0"},
             })
         except Exception as e:
             logger.warning(f"SSE initialize handshake failed (non-fatal): {e}")
@@ -316,7 +491,6 @@ class SseTransport(BackendTransport):
             response.raise_for_status()
 
             # Some SSE servers return the result directly in POST response
-            # if content-type is application/json
             content_type = response.headers.get("content-type", "")
             if "application/json" in content_type:
                 body = response.json()
@@ -413,12 +587,19 @@ class StdioTransport(BackendTransport):
 
     Communicates via JSON-RPC messages over stdin (requests) and
     stdout (responses), one JSON object per line.
+
+    Note: Stdio transport always uses the legacy protocol since the
+    2026-07-28 stateless model is designed for HTTP.
     """
 
     def __init__(self, config: BackendServer):
         self._config = config
         self._process: asyncio.subprocess.Process | None = None
         self._request_id = 0
+
+    @property
+    def protocol_version(self) -> str:
+        return PROTOCOL_2024
 
     async def connect(self) -> None:
         """Spawn the backend process."""
@@ -436,9 +617,9 @@ class StdioTransport(BackendTransport):
 
         # Send initialize request
         await self._send_request("initialize", {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": PROTOCOL_2025,
             "capabilities": {},
-            "clientInfo": {"name": "mcp-gateway", "version": "1.0.0"},
+            "clientInfo": {"name": "mcp-gateway", "version": "2.1.0"},
         })
 
     async def disconnect(self) -> None:

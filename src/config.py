@@ -39,6 +39,7 @@ class BackendServer:
     description: str = ""
     headers: dict[str, str] = field(default_factory=dict)  # Auth headers for backend
     tools: Optional[ToolFilter] = None  # Tool filtering rules
+    protocol_version: str = "auto"  # "auto", "2026-07-28", "2025-11-25", "2024-11-05"
 
     def __post_init__(self):
         if self.url:
@@ -53,6 +54,14 @@ class BackendServer:
         else:
             raise ValueError(
                 f"Backend '{self.name}' must have either 'url' or 'command'"
+            )
+
+        # Validate protocol_version
+        valid_versions = ("auto", "2026-07-28", "2025-11-25", "2024-11-05")
+        if self.protocol_version not in valid_versions:
+            raise ValueError(
+                f"Backend '{self.name}': invalid protocol_version "
+                f"'{self.protocol_version}'. Must be one of: {valid_versions}"
             )
 
     def to_dict(self) -> dict:
@@ -73,6 +82,8 @@ class BackendServer:
             d["env"] = self.env
         if self.headers:
             d["headers"] = self.headers
+        if self.protocol_version != "auto":
+            d["protocol_version"] = self.protocol_version
         if self.tools:
             tools_dict = {}
             if self.tools.include:
@@ -180,6 +191,7 @@ def _parse_backend(b: dict) -> BackendServer:
         description=b.get("description", ""),
         headers=b.get("headers", {}),
         tools=tool_filter,
+        protocol_version=b.get("protocol_version", "auto"),
     )
 
 
